@@ -101,31 +101,40 @@ export class PreviewWeb<TFramework extends AnyFramework> {
     // getProjectAnnotations has been run, thus this slightly awkward approach
     getStoryIndex?: () => StoryIndex;
     importFn: ModuleImportFn;
-    getProjectAnnotations: () => WebProjectAnnotations<TFramework>;
+    getProjectAnnotations: () => MaybePromise<WebProjectAnnotations<TFramework>>;
   }): MaybePromise<void> {
-    this.storyStore.setProjectAnnotations(
-      this.getProjectAnnotationsOrRenderError(getProjectAnnotations) || {}
-    );
-
     this.setupListeners();
 
     if (FEATURES?.storyStoreV7) {
-      this.indexClient = new StoryIndexClient();
-      return this.indexClient
-        .fetch()
-        .then((storyIndex: StoryIndex) => {
-          this.storyStore.initialize({
-            storyIndex,
-            importFn,
-            cache: false,
-          });
-          return this.setGlobalsAndRenderSelection();
-        })
-        .catch((err) => {
-          logger.warn(err);
-          this.renderPreviewEntryError(err);
-        });
+      return this.getProjectAnnotationsOrRenderError(getProjectAnnotations, false).then(
+        (projectAnnotations) => {
+          this.storyStore.setProjectAnnotations(projectAnnotations);
+          this.indexClient = new StoryIndexClient();
+          return this.indexClient
+            .fetch()
+            .then((storyIndex: StoryIndex) => {
+              this.storyStore.initialize({
+                storyIndex,
+                importFn,
+                cache: false,
+              });
+              return this.setGlobalsAndRenderSelection();
+            })
+            .catch((err) => {
+              logger.warn(err);
+              this.renderPreviewEntryError(err);
+            });
+        }
+      );
     }
+
+    // Same as above, but synchronous
+    this.storyStore.setProjectAnnotations(
+      this.getProjectAnnotationsOrRenderError(
+        getProjectAnnotations as () => WebProjectAnnotations<TFramework>,
+        true
+      )
+    );
 
     if (!getStoryIndex) {
       throw new Error('No `getStoryIndex` passed defined in v6 mode');
@@ -141,20 +150,47 @@ export class PreviewWeb<TFramework extends AnyFramework> {
   }
 
   getProjectAnnotationsOrRenderError(
-    getProjectAnnotations: () => WebProjectAnnotations<TFramework>
-  ): ProjectAnnotations<TFramework> | undefined {
-    let projectAnnotations;
-    try {
-      projectAnnotations = getProjectAnnotations();
-      this.renderToDOM = projectAnnotations.renderToDOM;
-      return projectAnnotations;
-    } catch (err) {
-      logger.warn(err);
-      // This is an error extracting the projectAnnotations (i.e. evaluating the previewEntries) and
-      // needs to be show to the user as a simple error
-      this.renderPreviewEntryError(err);
-      return undefined;
+    getProjectAnnotations: () => MaybePromise<WebProjectAnnotations<TFramework>>,
+    sync: false
+  ): Promise<ProjectAnnotations<TFramework>>;
+
+  getProjectAnnotationsOrRenderError(
+    getProjectAnnotations: () => WebProjectAnnotations<TFramework>,
+    sync: true
+  ): ProjectAnnotations<TFramework>;
+
+  getProjectAnnotationsOrRenderError(
+    getProjectAnnotations: () => MaybePromise<WebProjectAnnotations<TFramework>>,
+    sync: boolean
+  ): MaybePromise<ProjectAnnotations<TFramework>> {
+    if (sync) {
+      try {
+        const projectAnnotations = (getProjectAnnotations as () => WebProjectAnnotations<TFramework>)();
+        this.renderToDOM = projectAnnotations.renderToDOM;
+        return projectAnnotations;
+      } catch (err) {
+        logger.warn(err);
+        // This is an error extracting the projectAnnotations (i.e. evaluating the previewEntries) and
+        // needs to be show to the user as a simple error
+        this.renderPreviewEntryError(err);
+        return {};
+      }
     }
+
+    // Async version of the above
+    return Promise.resolve()
+      .then(() => getProjectAnnotations())
+      .then((projectAnnotations) => {
+        this.renderToDOM = projectAnnotations.renderToDOM;
+        return projectAnnotations;
+      })
+      .catch((err) => {
+        logger.warn(err);
+        // This is an error extracting the projectAnnotations (i.e. evaluating the previewEntries) and
+        // needs to be show to the user as a simple error
+        this.renderPreviewEntryError(err);
+        return {};
+      });
   }
 
   setupListeners() {
@@ -289,12 +325,15 @@ export class PreviewWeb<TFramework extends AnyFramework> {
   }
 
   // This happens when a config file gets reloade
-  onGetProjectAnnotationsChanged({
+  async onGetProjectAnnotationsChanged({
     getProjectAnnotations,
   }: {
-    getProjectAnnotations: () => ProjectAnnotations<TFramework>;
+    getProjectAnnotations: () => MaybePromise<ProjectAnnotations<TFramework>>;
   }) {
-    const projectAnnotations = this.getProjectAnnotationsOrRenderError(getProjectAnnotations);
+    const projectAnnotations = await this.getProjectAnnotationsOrRenderError(
+      getProjectAnnotations,
+      false
+    );
     if (!projectAnnotations) {
       return;
     }
